@@ -1,0 +1,32 @@
+[
+    {
+        "name": "Борис",
+        "age": 22,
+        "active": false,
+        "ID": 2
+    },
+    {
+        "name": "Игорь",
+        "age": 30,
+        "active": true,
+        "ID": 2
+    },
+    {
+        "name": "Анна",
+        "age": 20,
+        "active": true,
+        "ID": 3
+    },
+    {
+        "name": "Борис",
+        "age": 22,
+        "active": false,
+        "ID": 4
+    },
+    {
+        "name": "Игорь",
+        "age": 31,
+        "active": false,
+        "ID": 5
+    }
+]
