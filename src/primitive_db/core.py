@@ -1,304 +1,207 @@
-from pathlib import Path
-import json
 from prettytable import PrettyTable
 
+from primitive_db.constants import META_FILE, VALID_TYPES
+from primitive_db.decorators import (
+    confirm_action,
+    create_cacher,
+    handle_db_errors,
+    log_time,
+)
+from primitive_db.utils import load_table_data, save_metadata, save_table_data
 
-VALID_TYPES = {"int", "str", "bool"}
-
-
-def create_table(metadata, table_name, columns):
-    """Create a new table in metadata."""
-    if table_name in metadata:
-        print(f'Ошибка: Таблица "{table_name}" уже существует.')
-        return metadata
-
-    parsed_columns = [("ID", "int")]
-
-    for column in columns:
-        if ":" not in column:
-            print(f"Некорректное значение: {column}. Попробуйте снова.")
-            return metadata
-
-        column_name, column_type = column.split(":", 1)
-
-        if column_type not in VALID_TYPES:
-            print(f"Некорректное значение: {column_type}. Попробуйте снова.")
-            return metadata
-
-        parsed_columns.append((column_name, column_type))
-
-    metadata[table_name] = parsed_columns
-
-    table_file = Path(f"{table_name}.json")
-    with open(table_file, "w", encoding="utf-8") as file:
-        json.dump([], file, ensure_ascii=False, indent=4)
-
-    print(
-        f'Таблица "{table_name}" успешно создана со столбцами: '
-        + ", ".join(f"{name}:{col_type}" for name, col_type in parsed_columns)
-    )
-    return metadata
+select_cache = create_cacher()
 
 
-def drop_table(metadata, table_name):
-    """Drop table from metadata."""
+def _normalize_bool(value):
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        lowered = value.lower()
+        if lowered == "true":
+            return True
+        if lowered == "false":
+            return False
+    raise ValueError(f"Некорректное значение bool: {value}")
+
+
+def _validate_value(value, expected_type):
+    if expected_type == "int":
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError(f"Ожидался int, получено: {value}")
+        return value
+    if expected_type == "str":
+        if not isinstance(value, str):
+            raise ValueError(f"Ожидался str, получено: {value}")
+        return value
+    if expected_type == "bool":
+        return _normalize_bool(value)
+    raise ValueError(f"Неподдерживаемый тип: {expected_type}")
+
+
+def _get_schema(metadata, table_name):
     if table_name not in metadata:
-        print(f'Ошибка: Таблица "{table_name}" не существует.')
-        return metadata
+        raise KeyError(table_name)
+    return metadata[table_name]
 
-    del metadata[table_name]
-    table_file = Path(f"{table_name}.json")
-    if table_file.exists():
-        table_file.unlink()
 
-    print(f'Таблица "{table_name}" успешно удалена.')
+def _match_where(row, where_clause):
+    if where_clause is None:
+        return True
+    for key, value in where_clause.items():
+        if key not in row:
+            raise KeyError(key)
+        if row[key] != value:
+            return False
+    return True
+
+
+@handle_db_errors
+def create_table(metadata, table_name, columns):
+    """Create a table in metadata."""
+    if table_name in metadata:
+        raise ValueError(f'Таблица "{table_name}" уже существует.')
+    validated_columns = []
+    for name, column_type in columns:
+        if column_type not in VALID_TYPES:
+            raise ValueError(
+                f"Некорректное значение: {column_type}. Попробуйте снова."
+            )
+        validated_columns.append([name, column_type])
+    metadata[table_name] = [["ID", "int"], *validated_columns]
+    save_metadata(META_FILE, metadata)
+    save_table_data(table_name, [])
+    columns_text = ", ".join(
+        f"{column_name}:{column_type}"
+        for column_name, column_type in metadata[table_name]
+    )
+    print(f'Таблица "{table_name}" успешно создана со столбцами: {columns_text}')
     return metadata
 
 
+@handle_db_errors
 def list_tables(metadata):
     """Print all tables."""
     if not metadata:
         print("Таблиц пока нет.")
-        return
-
+        return []
     for table_name in metadata:
-        print(f"- {table_name}")
+        print(table_name)
+    return list(metadata.keys())
 
 
-def convert_value(value, column_type):
-    """Convert string value to column type."""
-    if column_type == "int":
-        return int(value)
-
-    if column_type == "bool":
-        if value.lower() == "true":
-            return True
-        if value.lower() == "false":
-            return False
-        raise ValueError
-
-    return value
-
-
-def insert_row(metadata, table_name, values):
-    """Insert one row into a table."""
+@handle_db_errors
+@confirm_action("удаление таблицы")
+def drop_table(metadata, table_name):
+    """Drop table from metadata."""
     if table_name not in metadata:
-        print(f'Ошибка: Таблица "{table_name}" не существует.')
-        return
-
-    columns = metadata[table_name]
-    row = {}
-
-    for item in values:
-        if "=" not in item:
-            print(f"Некорректное значение: {item}. Попробуйте снова.")
-            return
-
-        column_name, value = item.split("=", 1)
-
-        if column_name == "ID":
-            print('Ошибка: Поле "ID" заполняется автоматически.')
-            return
-
-        column_type = None
-        for name, data_type in columns:
-            if name == column_name:
-                column_type = data_type
-                break
-
-        if column_type is None:
-            print(f'Ошибка: Столбца "{column_name}" нет в таблице.')
-            return
-
-        try:
-            row[column_name] = convert_value(value, column_type)
-        except ValueError:
-            print(
-                f'Ошибка: Значение "{value}" '
-                f'не соответствует типу "{column_type}".'
-            )
-            return
-
-    table_file = Path(f"{table_name}.json")
-
-    with open(table_file, "r", encoding="utf-8") as file:
-        rows = json.load(file)
-
-    if rows:
-        max_id = max(item.get("ID", 0) for item in rows)
-    else:
-        max_id = 0
-
-    row["ID"] = max_id + 1
-    rows.append(row)
-
-    with open(table_file, "w", encoding="utf-8") as file:
-        json.dump(rows, file, ensure_ascii=False, indent=4)
-
-    print(f'Запись успешно добавлена в таблицу "{table_name}".')
+        raise ValueError(f'Таблица "{table_name}" не существует.')
+    del metadata[table_name]
+    save_metadata(META_FILE, metadata)
+    save_table_data(table_name, [])
+    print(f'Таблица "{table_name}" успешно удалена.')
+    return metadata
 
 
-def select_rows(metadata, table_name):
-    """Print all rows from a table."""
-    if table_name not in metadata:
-        print(f'Ошибка: Таблица "{table_name}" не существует.')
-        return
-
-    table_file = Path(f"{table_name}.json")
-
-    with open(table_file, "r", encoding="utf-8") as file:
-        rows = json.load(file)
-
-    if not rows:
-        print(f'В таблице "{table_name}" пока нет записей.')
-        return
-
-    columns = [name for name, _ in metadata[table_name]]
-
-    table = PrettyTable()
-    table.field_names = columns
-
-    for row in rows:
-        table.add_row([row.get(column, "") for column in columns])
-
-    print(table)
+@handle_db_errors
+@log_time
+def insert(metadata, table_name, values):
+    """Insert row into table."""
+    schema = _get_schema(metadata, table_name)
+    if len(values) != len(schema) - 1:
+        raise ValueError("Количество значений не соответствует количеству столбцов.")
+    data = load_table_data(table_name)
+    new_id = max((row["ID"] for row in data), default=0) + 1
+    row = {"ID": new_id}
+    for (column_name, column_type), value in zip(schema[1:], values, strict=False):
+        row[column_name] = _validate_value(value, column_type)
+    data.append(row)
+    save_table_data(table_name, data)
+    print(f'Запись с ID={new_id} успешно добавлена в таблицу "{table_name}".')
+    return data
 
 
-def delete_row(metadata, table_name, row_id):
-    """Delete row from table by ID."""
-    if table_name not in metadata:
-        print(f'Ошибка: Таблица "{table_name}" не существует.')
-        return
+@handle_db_errors
+@log_time
+def select(metadata, table_name, where_clause=None):
+    """Select rows from table."""
+    _get_schema(metadata, table_name)
+    data = load_table_data(table_name)
+    cache_key = (
+        table_name,
+        tuple(sorted(where_clause.items())) if where_clause else None,
+        str(data),
+    )
 
-    table_file = Path(f"{table_name}.json")
+    def calculate_result():
+        return [row for row in data if _match_where(row, where_clause)]
 
-    with open(table_file, "r", encoding="utf-8") as file:
-        rows = json.load(file)
+    rows = select_cache(cache_key, calculate_result)
+    return rows
 
-    new_rows = [row for row in rows if row.get("ID") != row_id]
 
-    if len(new_rows) == len(rows):
-        print(f'Ошибка: Запись с ID {row_id} не найдена.')
-        return
+@handle_db_errors
+def update(metadata, table_name, set_clause, where_clause):
+    """Update rows in table."""
+    schema = _get_schema(metadata, table_name)
+    schema_map = {column_name: column_type for column_name, column_type in schema}
+    data = load_table_data(table_name)
+    updated_ids = []
+    for row in data:
+        if _match_where(row, where_clause):
+            for column_name, value in set_clause.items():
+                if column_name == "ID":
+                    raise ValueError("Поле ID нельзя изменять.")
+                if column_name not in schema_map:
+                    raise KeyError(column_name)
+                row[column_name] = _validate_value(value, schema_map[column_name])
+            updated_ids.append(row["ID"])
+    if not updated_ids:
+        raise ValueError("Записи по условию не найдены.")
+    save_table_data(table_name, data)
+    for row_id in updated_ids:
+        print(f'Запись с ID={row_id} в таблице "{table_name}" успешно обновлена.')
+    return data
 
-    with open(table_file, "w", encoding="utf-8") as file:
-        json.dump(new_rows, file, ensure_ascii=False, indent=4)
 
-    print(f'Запись с ID {row_id} успешно удалена из таблицы "{table_name}".')
-
-def update_row(metadata, table_name, row_id, values):
-    """Update row fields by ID."""
-    if table_name not in metadata:
-        print(f'Ошибка: Таблица "{table_name}" не существует.')
-        return
-
-    table_file = Path(f"{table_name}.json")
-
-    with open(table_file, "r", encoding="utf-8") as file:
-        rows = json.load(file)
-
-    row_to_update = None
-
-    for row in rows:
-        if row.get("ID") == row_id:
-            row_to_update = row
-            break
-
-    if row_to_update is None:
-        print(f'Ошибка: Запись с ID {row_id} не найдена.')
-        return
-
-    for item in values:
-        if "=" not in item:
-            print(f"Некорректное значение: {item}. Попробуйте снова.")
-            return
-
-        column_name, value = item.split("=", 1)
-
-        if column_name == "ID":
-            print('Ошибка: Поле "ID" изменять нельзя.')
-            return
-
-        column_type = None
-
-        for name, data_type in metadata[table_name]:
-            if name == column_name:
-                column_type = data_type
-                break
-
-        if column_type is None:
-            print(f'Ошибка: Столбца "{column_name}" нет в таблице.')
-            return
-
-        try:
-            row_to_update[column_name] = convert_value(value, column_type)
-        except ValueError:
-            print(
-                f'Ошибка: Значение "{value}" '
-                f'не соответствует типу "{column_type}".'
-            )
-            return
-
-    with open(table_file, "w", encoding="utf-8") as file:
-        json.dump(rows, file, ensure_ascii=False, indent=4)
-
-    print(f'Запись с ID {row_id} успешно обновлена.')
-    
-def find_rows(metadata, table_name, condition):
-    """Find rows by one condition: column=value."""
-    if table_name not in metadata:
-        print(f'Ошибка: Таблица "{table_name}" не существует.')
-        return
-
-    if "=" not in condition:
-        print("Некорректное условие. Используйте формат столбец=значение.")
-        return
-
-    column_name, value = condition.split("=", 1)
-
-    if column_name == "ID":
-        column_type = "int"
-    else:
-        column_type = None
-
-        for name, data_type in metadata[table_name]:
-            if name == column_name:
-                column_type = data_type
-                break
-
-    if column_type is None:
-        print(f'Ошибка: Столбца "{column_name}" нет в таблице.')
-        return
-
-    try:
-        search_value = convert_value(value, column_type)
-    except ValueError:
+@handle_db_errors
+@confirm_action("удаление записи")
+def delete(metadata, table_name, where_clause):
+    """Delete rows from table."""
+    _get_schema(metadata, table_name)
+    data = load_table_data(table_name)
+    rows_to_delete = [row for row in data if _match_where(row, where_clause)]
+    if not rows_to_delete:
+        raise ValueError("Записи по условию не найдены.")
+    remaining_rows = [row for row in data if not _match_where(row, where_clause)]
+    save_table_data(table_name, remaining_rows)
+    for row in rows_to_delete:
         print(
-            f'Ошибка: Значение "{value}" '
-            f'не соответствует типу "{column_type}".'
+            f'Запись с ID={row["ID"]} успешно удалена из таблицы "{table_name}".'
         )
+    return remaining_rows
+
+
+@handle_db_errors
+def info(metadata, table_name):
+    """Print table info."""
+    schema = _get_schema(metadata, table_name)
+    data = load_table_data(table_name)
+    columns_text = ", ".join(
+        f"{name}:{column_type}" for name, column_type in schema
+    )
+    print(f"Таблица: {table_name}")
+    print(f"Столбцы: {columns_text}")
+    print(f"Количество записей: {len(data)}")
+    return {"table": table_name, "columns": schema, "count": len(data)}
+
+
+def print_rows(rows):
+    """Print rows with PrettyTable."""
+    if not rows:
+        print("Нет данных.")
         return
-
-    table_file = Path(f"{table_name}.json")
-
-    with open(table_file, "r", encoding="utf-8") as file:
-        rows = json.load(file)
-
-    found_rows = [
-        row for row in rows
-        if row.get(column_name) == search_value
-    ]
-
-    if not found_rows:
-        print("Подходящие записи не найдены.")
-        return
-
-    columns = [name for name, _ in metadata[table_name]]
-
     table = PrettyTable()
-    table.field_names = columns
-
-    for row in found_rows:
-        table.add_row([row.get(column, "") for column in columns])
-
+    table.field_names = list(rows[0].keys())
+    for row in rows:
+        table.add_row(list(row.values()))
     print(table)

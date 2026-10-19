@@ -1,115 +1,203 @@
-from pathlib import Path
-import prompt
-from primitive_db.core import create_table, delete_row, drop_table, insert_row, list_tables, select_rows
-from primitive_db.utils import load_metadata, save_metadata
-from primitive_db.core import create_table, delete_row, drop_table, insert_row, list_tables, select_rows, update_row
-from primitive_db.core import create_table, delete_row, drop_table, find_rows, insert_row, list_tables, select_rows, update_row
+#!/usr/bin/env python3
+import shlex
 
-METADATA_FILE = Path("db_meta.json")
+import prompt
+
+from primitive_db.constants import (
+    HELP_TEXT,
+    INVALID_COMMAND,
+    INVALID_VALUE,
+    META_FILE,
+    RUN_MESSAGE,
+)
+from primitive_db.core import (
+    create_table,
+    delete,
+    drop_table,
+    info,
+    insert,
+    list_tables,
+    print_rows,
+    select,
+    update,
+)
+from primitive_db.parser import (
+    parse_columns,
+    parse_condition,
+    parse_set_clause,
+    parse_values,
+)
+from primitive_db.utils import load_metadata
 
 
 def print_help():
-    """Print help message."""
-    print("\n***")
-    print("<command> exit - выйти из программы")
-    print("<command> help - справочная информация")
-    print("<command> create_table - создать таблицу")
-    print("<command> list_tables - показать таблицы")
-    print("<command> drop_table - удалить таблицу")
-    print("<command> insert - добавить запись")
-    print("<command> select - показать записи таблицы")
-    print("<command> delete - удалить запись по ID")
-    print("<command> update - изменить запись по ID")
-    print("<command> find - найти записи по условию")
+    """Print help text."""
+    print(HELP_TEXT)
+
 
 def welcome():
     """Print welcome message."""
-    print("Первая попытка запустить проект!")
+    print(RUN_MESSAGE)
+    print_help()
+
+
+def get_where_text(user_input):
+    """Return original-case text after WHERE."""
+    lower_input = user_input.lower()
+    where_index = lower_input.index(" where ")
+    return user_input[where_index + 7 :]
 
 
 def run():
-    """Run command loop."""
+    """Run database command loop."""
     welcome()
 
     while True:
-        command = prompt.string("Введите команду: ")
+        metadata = load_metadata(META_FILE)
+        user_input = prompt.string("Введите команду: ").strip()
 
-        if command == "help":
-            print_help()
+        if not user_input:
+            continue
 
-        elif command == "create_table":
-            metadata = load_metadata(METADATA_FILE)
+        try:
+            tokens = shlex.split(user_input)
+        except ValueError:
+            print(INVALID_VALUE.format(value=user_input))
+            continue
 
-            table_name = prompt.string("Введите имя таблицы: ")
-            columns_text = prompt.string(
-                "Введите столбцы через пробел в формате имя:тип: "
-            )
+        command = tokens[0].lower()
 
-            columns = columns_text.split()
-            metadata = create_table(metadata, table_name, columns)
-            save_metadata(METADATA_FILE, metadata)
-
-        elif command == "list_tables":
-            metadata = load_metadata(METADATA_FILE)
-            list_tables(metadata)
-
-        elif command == "drop_table":
-            metadata = load_metadata(METADATA_FILE)
-
-            table_name = prompt.string("Введите имя таблицы для удаления: ")
-            metadata = drop_table(metadata, table_name)
-            save_metadata(METADATA_FILE, metadata)
-
-        elif command == "insert":
-            metadata = load_metadata(METADATA_FILE)
-
-            table_name = prompt.string("Введите имя таблицы: ")
-            values_text = prompt.string(
-                "Введите значения через пробел в формате столбец=значение: "
-            )
-
-            values = values_text.split()
-            insert_row(metadata, table_name, values)
-
-        elif command == "select":
-            metadata = load_metadata(METADATA_FILE)
-
-            table_name = prompt.string("Введите имя таблицы: ")
-            select_rows(metadata, table_name)
-
-        elif command == "delete":
-            metadata = load_metadata(METADATA_FILE)
-
-            table_name = prompt.string("Введите имя таблицы: ")
-            row_id = int(prompt.string("Введите ID записи для удаления: "))
-
-            delete_row(metadata, table_name, row_id)        
-
-        elif command == "update":
-            metadata = load_metadata(METADATA_FILE)
-
-            table_name = prompt.string("Введите имя таблицы: ")
-            row_id = int(prompt.string("Введите ID записи для изменения: "))
-            values_text = prompt.string(
-                "Введите новые значения через пробел в формате столбец=значение: "
-            )
-
-            values = values_text.split()
-            update_row(metadata, table_name, row_id, values)
-
-        elif command == "find":
-            metadata = load_metadata(METADATA_FILE)
-
-            table_name = prompt.string("Введите имя таблицы: ")
-            condition = prompt.string(
-                "Введите условие в формате столбец=значение: "
-            )
-
-            find_rows(metadata, table_name, condition)
-
-        elif command == "exit":
+        if command == "exit":
             print("Выход из программы.")
             break
 
-        else:
-            print(f'Функции "{command}" нет. Попробуйте снова.')
+        if command == "help":
+            print_help()
+            continue
+
+        if command == "list_tables":
+            list_tables(metadata)
+            continue
+
+        if command == "create_table":
+            if len(tokens) < 3:
+                print(INVALID_VALUE.format(value=user_input))
+                continue
+
+            table_name = tokens[1]
+
+            try:
+                columns = parse_columns(tokens[2:])
+            except ValueError as error:
+                print(INVALID_VALUE.format(value=error))
+                continue
+
+            create_table(metadata, table_name, columns)
+            continue
+
+        if command == "drop_table":
+            if len(tokens) != 2:
+                print(INVALID_VALUE.format(value=user_input))
+                continue
+
+            drop_table(metadata, tokens[1])
+            continue
+
+        if command == "info":
+            if len(tokens) != 2:
+                print(INVALID_VALUE.format(value=user_input))
+                continue
+
+            info(metadata, tokens[1])
+            continue
+
+        is_insert_command = (
+            command == "insert"
+            and len(tokens) >= 4
+            and tokens[1].lower() == "into"
+        )
+
+        if is_insert_command:
+            table_name = tokens[2]
+
+            try:
+                values = parse_values(user_input)
+            except ValueError as error:
+                print(INVALID_VALUE.format(value=error))
+                continue
+
+            insert(metadata, table_name, values)
+            continue
+
+        is_select_command = (
+            command == "select"
+            and len(tokens) >= 3
+            and tokens[1].lower() == "from"
+        )
+
+        if is_select_command:
+            table_name = tokens[2]
+
+            if len(tokens) == 3:
+                rows = select(metadata, table_name)
+                if rows is not None:
+                    print_rows(rows)
+                continue
+
+            if len(tokens) >= 5 and tokens[3].lower() == "where":
+                try:
+                    where_clause = parse_condition(get_where_text(user_input))
+                except ValueError as error:
+                    print(INVALID_VALUE.format(value=error))
+                    continue
+
+                rows = select(metadata, table_name, where_clause)
+                if rows is not None:
+                    print_rows(rows)
+                continue
+
+        is_update_command = (
+            command == "update"
+            and " set " in user_input.lower()
+            and " where " in user_input.lower()
+        )
+
+        if is_update_command:
+            table_name = tokens[1]
+            lower_input = user_input.lower()
+            set_start = lower_input.index(" set ") + 5
+            where_start = lower_input.index(" where ")
+
+            set_text = user_input[set_start:where_start]
+            where_text = user_input[where_start + 7 :]
+
+            try:
+                set_clause = parse_set_clause(set_text)
+                where_clause = parse_condition(where_text)
+            except ValueError as error:
+                print(INVALID_VALUE.format(value=error))
+                continue
+
+            update(metadata, table_name, set_clause, where_clause)
+            continue
+
+        is_delete_command = (
+            command == "delete"
+            and len(tokens) >= 5
+            and tokens[1].lower() == "from"
+            and " where " in user_input.lower()
+        )
+
+        if is_delete_command:
+            table_name = tokens[2]
+
+            try:
+                where_clause = parse_condition(get_where_text(user_input))
+            except ValueError as error:
+                print(INVALID_VALUE.format(value=error))
+                continue
+
+            delete(metadata, table_name, where_clause)
+            continue
+
+        print(INVALID_COMMAND.format(command=command))
